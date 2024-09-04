@@ -1,0 +1,3 @@
+.terraform*
+.vscode-server*
+terraform.tfstate*
