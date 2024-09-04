@@ -4,9 +4,14 @@ terraform {
       source  = "hashicorp/azurerm"
       version = "=3.0.0"
     }
+    remote = {
+      source = "tenstad/remote"
+      version = "0.1.3"
+    }
   }
 }
 
+# ------------- Configure variables ----------------------
 variable "AZURE_TENANT_ID" {
   type = string
 }
@@ -33,6 +38,10 @@ provider "azurerm" {
 variable "vm_count" {
   type    = number
   default = 3
+  validation {
+    condition     = var.vm_count >= 2 && var.vm_count <= 100
+    error_message = "The value of vm_count must be between 2 and 100."
+  }
 }
 
 resource "random_password" "vm_password" {
@@ -41,7 +50,7 @@ resource "random_password" "vm_password" {
   special = true
 }
 
-
+# --------------- Provision the VMs and their dependencies -------------------
 resource "azurerm_resource_group" "rg" {
   name     = "tf-demo"
   location = "Germany West Central"
@@ -84,6 +93,14 @@ resource "azurerm_subnet_network_security_group_association" "assoc" {
   network_security_group_id = azurerm_network_security_group.nsg.id
 }
 
+resource "azurerm_public_ip" "public_ip" {
+  count               = var.vm_count
+  name                = "demo-pip-${count.index}"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Dynamic"
+}
+
 resource "azurerm_network_interface" "nic" {
   count               = var.vm_count
   name                = "tf-demo-nic-${count.index}"
@@ -94,6 +111,7 @@ resource "azurerm_network_interface" "nic" {
     name                          = "internal"
     subnet_id                     = azurerm_subnet.subnet.id
     private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.public_ip[count.index].id
   }
 }
 
@@ -121,6 +139,59 @@ resource "azurerm_linux_virtual_machine" "vm" {
   }
 }
 
+# ---------- Wait for VM public ip addresses to be provisioned and available--------------------
+resource "null_resource" "wait_for_ip" {
+  count = var.vm_count
+
+  provisioner "local-exec" {
+    command = <<EOT
+    while ! nc -zv ${azurerm_public_ip.public_ip[count.index].ip_address} 22; do
+      echo "Waiting for VM ${count.index} Public IP to be accessible..."
+      sleep 5
+    done
+    echo "Public IP ${azurerm_public_ip.public_ip[count.index].ip_address} is now accessible."
+    EOT
+  }
+}
+# ---------- Run the ping test on each VM --------------------
+resource "null_resource" "ping_test" {
+  count = var.vm_count
+
+  provisioner "remote-exec" {
+    connection {
+      type        = "ssh"
+      host        = azurerm_public_ip.public_ip[count.index].ip_address
+      user        = azurerm_linux_virtual_machine.vm[count.index].admin_username
+      password    = random_password.vm_password[count.index].result
+    }
+
+    inline = [
+      "ping -c 4 ${azurerm_linux_virtual_machine.vm[(count.index + 1)%var.vm_count].private_ip_address} | tee /home/demo/ping.txt"
+    ]
+  }
+
+  triggers = {
+    always_run = timestamp()
+  }
+
+  depends_on = [null_resource.wait_for_ip]
+}
+
+data "remote_file" "ping" {
+  count = var.vm_count
+
+  conn {
+    host     = azurerm_public_ip.public_ip[count.index].ip_address
+    user     = azurerm_linux_virtual_machine.vm[count.index].admin_username
+    password = random_password.vm_password[count.index].result
+    sudo     = true
+  }
+
+  path = "/home/demo/ping.txt"
+  depends_on = [null_resource.ping_test]
+}
+
+# ------------- Save the outputs ------------
 output "vm_user" {
   value = {
     for i in range(var.vm_count) : "vm_${i + 1}_username" => azurerm_linux_virtual_machine.vm[i].admin_username
@@ -129,9 +200,9 @@ output "vm_user" {
 
 output "vm_passwords" {
   sensitive = true
-  value = nonsensitive({
+  value = {
     for i in range(var.vm_count) : "vm_${i + 1}_password" => nonsensitive(random_password.vm_password[i].result)
-  })
+  }
 }
 
 resource "local_file" "passwords" {
@@ -139,4 +210,10 @@ resource "local_file" "passwords" {
       for i in range(var.vm_count) : "vm_${i + 1}_password" => random_password.vm_password[i].result
     })
     filename = "passwords.txt"
+}
+
+output "ping_results" {
+  value = {
+    for i in range(var.vm_count) : "vm_${i}_to_vm_${(i+1)%var.vm_count}" => data.remote_file.ping[i].content
+  }
 }
