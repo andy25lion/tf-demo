@@ -140,16 +140,22 @@ resource "azurerm_linux_virtual_machine" "vm" {
 }
 
 # ---------- Wait for VM public ip addresses to be provisioned and available--------------------
+data "azurerm_public_ip" "public_ip" {
+  count = var.vm_count
+  name = azurerm_public_ip.public_ip[count.index].name
+  resource_group_name = azurerm_resource_group.rg.name
+  depends_on          = [azurerm_linux_virtual_machine.vm]
+}
 resource "null_resource" "wait_for_ip" {
   count = var.vm_count
 
   provisioner "local-exec" {
     command = <<EOT
-    while ! nc -zv ${azurerm_public_ip.public_ip[count.index].ip_address} 22; do
+    while ! nc -zv ${data.azurerm_public_ip.public_ip[count.index].ip_address} 22; do
       echo "Waiting for VM ${count.index} Public IP to be accessible..."
       sleep 5
     done
-    echo "Public IP ${azurerm_public_ip.public_ip[count.index].ip_address} is now accessible."
+    echo "Public IP ${data.azurerm_public_ip.public_ip[count.index].ip_address} is now accessible."
     EOT
   }
 }
@@ -160,7 +166,7 @@ resource "null_resource" "ping_test" {
   provisioner "remote-exec" {
     connection {
       type        = "ssh"
-      host        = azurerm_public_ip.public_ip[count.index].ip_address
+      host        = data.azurerm_public_ip.public_ip[count.index].ip_address
       user        = azurerm_linux_virtual_machine.vm[count.index].admin_username
       password    = random_password.vm_password[count.index].result
     }
@@ -181,7 +187,7 @@ data "remote_file" "ping" {
   count = var.vm_count
 
   conn {
-    host     = azurerm_public_ip.public_ip[count.index].ip_address
+    host     = data.azurerm_public_ip.public_ip[count.index].ip_address
     user     = azurerm_linux_virtual_machine.vm[count.index].admin_username
     password = random_password.vm_password[count.index].result
     sudo     = true
