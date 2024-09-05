@@ -1,3 +1,4 @@
 {
-    "image": "tf-demo"
+    "build": { "dockerfile": "../Dockerfile" }
+    // "image": "tf-demo"
 }
